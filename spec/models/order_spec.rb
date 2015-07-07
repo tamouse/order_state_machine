@@ -2,219 +2,332 @@ require 'rails_helper'
 
 RSpec.describe Order, type: :model do
   describe "state machine" do
-    let(:order) {Order.create}
-    describe "ready order" do
-      context "when order is not ready to order" do
-        it "will fail to transition to :ready state" do
-          order.ready_order
-          expect(order.ready?).to be false
-          expect(order.pending?).to be true
+    describe "advance pending" do
+      let(:order) {Order.create}
+      context "when shipping address is NOT present" do
+        it "will not advance to has_shipping_address" do
+          expect(order).to be_pending, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_pending, "Order state: #{order.aasm.current_state}"
         end
       end
-      context "when order is ready to order" do
-        it "will transition to :ready state" do
-          order.create_payment_method
+      context "when shipping address present" do
+        it "will advance to has_shipping_address" do
+          order.create_shipping_address(zip: "55401")
+          expect(order).to be_pending, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_shipping_address, "Order state: #{order.aasm.current_state}"
+        end
+      end
+    end
+    describe "advance has_shipping_address" do
+      let(:order) do
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance
+        o
+      end
+
+      context "when build_shipments does NOT work" do
+        it "will not advance to has_shipments" do
+          expect(order).to receive(:build_shipments).and_return(false)
+          order.shipments.destroy_all
+          expect(order).to be_has_shipping_address, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_shipment_quote_failed, "Order state: #{order.aasm.current_state}"
+        end
+      end
+      context "when build_shipments works" do
+        it "will advance to has_shipments" do
+          expect(order).to receive(:build_shipments).and_return(true)
           order.shipments.create
-          order.ready_order
-          expect(order.ready?).to be true
-          expect(order.pending?).to be false
+          expect(order).to be_has_shipping_address, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_shipments, "Order state: #{order.aasm.current_state}"
         end
       end
     end
-
-    describe "place order" do
+    describe "advance has_shipments" do
       let(:order) do
-        o=Order.create
-        o.create_payment_method
-        o.shipments.create
-        o.ready_order
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
         o
       end
 
-      context "when placing order fails" do
-        it "will fail to transition to :shipping state" do
-          expect(order).to be_ready
+      before do
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance               # to has_shipments
+      end
+
+      context "when shipping options are NOT set" do
+        it "will not advance to has_shipping_options" do
+          expect(order).to receive(:set_shipping_options).and_return(false)
+          expect(order).to be_has_shipments, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_shipments, "Order state: #{order.aasm.current_state}"
+        end
+      end
+      context "when shipping options ARE set" do
+        it "will advance to has_shipping_options" do
+          expect(order).to receive(:set_shipping_options).and_return(true)
+          expect(order).to be_has_shipments, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_shipping_options, "Order state: #{order.aasm.current_state}"
+        end
+      end
+    end
+    describe "advance has_shipping_options" do
+      let(:order) do
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
+        o
+      end
+
+      before do
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance            # to has_shipments
+        allow(order).to receive(:set_shipping_options).and_return(true)
+        order.advance            # to has_shipping_options
+      end
+
+      context "when there is no payment method" do
+        it "will not advance to has_payment_method" do
+          # expect(order).to receive(:payment_method).and_return(nil)
+          expect(order).to be_has_shipping_options, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_shipping_options, "Order state: #{order.aasm.current_state}"
+        end
+      end
+      context "when there IS a payment method" do
+        it "will not advance to has_payment_method" do
+          order.create_payment_method
+          expect(order).to be_has_shipping_options, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_payment_method, "Order state: #{order.aasm.current_state}"
+        end
+      end
+    end
+    describe "advance has_payment_method" do
+      let(:order) do
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
+        o
+      end
+
+      before do
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance           # to has_shipments
+        allow(order).to receive(:set_shipping_options).and_return(true)
+        order.advance           # to has_shipping_options
+        order.create_payment_method
+        order.advance           # to has_payment_method
+      end
+
+      context "when order is NOT ready to be placed" do
+        it "will NOT advance to ready_to_order" do
+          order.payment_method.declined!
+          expect(order).to be_has_payment_method, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_has_payment_method, "Order state: #{order.aasm.current_state}"
+        end
+      end
+      context "when order ID ready to be placed" do
+        it "will NOT advance to ready_to_order" do
+          order.payment_method.accepted!
+          expect(order).to be_has_payment_method, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_ready_to_order, "Order state: #{order.aasm.current_state}, errors: #{order.errors.messages.inspect}"
+        end
+      end
+    end
+    describe "advance ready_to_order" do
+      let(:order) do
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
+        o
+      end
+
+      before do
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance           # to has_shipments
+        allow(order).to receive(:set_shipping_options).and_return(true)
+        order.advance           # to has_shipping_options
+        order.create_payment_method
+        order.advance           # to has_payment_method
+        order.payment_method.accepted!
+        order.advance           # to ready_to_order
+      end
+
+      context "when payment authorization FAILS" do
+        it "will advance to :authorization_failed" do
+          expect(order).to receive(:authorize_charge).and_return(false)
+          expect(order).to be_ready_to_order, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_authorization_failed, "Order state: #{order.aasm.current_state}"
+        end
+      end
+      context "when payment authorization SUCCEEDS" do
+        it "will advance to payment_authorized" do
+          expect(order).to receive(:authorize_charge).and_return(true)
+          expect(order).to be_ready_to_order, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_payment_authorized, "Order state: #{order.aasm.current_state}"
+        end
+      end
+    end
+    describe "advance payment_authorized" do
+      let(:order) do
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
+        o
+      end
+
+      before do
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance           # to has_shipments
+        allow(order).to receive(:set_shipping_options).and_return(true)
+        order.advance           # to has_shipping_options
+        order.create_payment_method
+        order.advance           # to has_payment_method
+        order.payment_method.accepted!
+        order.advance           # to ready_to_order
+        allow(order).to receive(:authorize_charge).and_return(true)
+        order.advance           # to payment_authorized
+      end
+
+      context "when submitting order FAILS" do
+        it "will advance to :order_failed" do
           expect(order).to receive(:submit_order).and_return(false)
-          order.place_order
-          expect(order).to be_auth_failed, "Order state: #{order.aasm_state}"
-          expect(order).not_to be_shipping, "Order state: #{order.aasm_state}"
+          expect(order).to be_payment_authorized, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_order_failed, "Order state: #{order.aasm.current_state}"
         end
       end
-
-      context "when placing order succeeds" do
-        it "will transitions to :shipping state" do
-          expect(order).to be_ready
+      context "when submitting order SUCCEEDS" do
+        it "will advance to :ordered" do
           expect(order).to receive(:submit_order).and_return(true)
-          order.place_order
-          expect(order).not_to be_auth_failed, "Order state: #{order.aasm_state}"
-          expect(order).to be_shipping, "Order state: #{order.aasm_state}"
+          expect(order).to be_payment_authorized, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_ordered, "Order state: #{order.aasm.current_state}"
         end
       end
     end
-
-    describe "shipping completed" do
-
+    describe "advance ordered" do
       let(:order) do
-        o=Order.create
-        o.create_payment_method
-        o.shipments.create
-        o.shipments.create
-        o.ready_order
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
         o
       end
 
       before do
-        expect(order).to receive(:submit_order).and_return(true)
-        order.place_order
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance           # to has_shipments
+        allow(order).to receive(:set_shipping_options).and_return(true)
+        order.advance           # to has_shipping_options
+        order.create_payment_method
+        order.advance           # to has_payment_method
+        order.payment_method.accepted!
+        order.advance           # to ready_to_order
+        allow(order).to receive(:authorize_charge).and_return(true)
+        order.advance           # to payment_authorized
+        allow(order).to receive(:submit_order).and_return(true)
+        order.advance           # to ordered
       end
 
-      context "when no shipments shipped of 2" do
-        it "will fail to transition to :settling state" do
-          order.shipping_completed
-          expect(order).to be_shipping, "Order state: #{order.aasm.current_state}"
-          expect(order).not_to be_settling, "Order state: #{order.aasm.current_state}"
+      context "when some shipments are NOT shipped yet" do
+        it "will NOT advance to :shipped" do
+          expect(order).to receive(:all_shipped?).and_return(false)
+          expect(order).to be_ordered, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_ordered, "Order state: #{order.aasm.current_state}"
         end
       end
-
-      context "when one shipments shipped of 2" do
-        it "will fail to transition to :settling state" do
-          order.shipments.first.mark_shipped
-          order.shipping_completed
-          expect(order).to be_shipping, "Order state: #{order.aasm.current_state}"
-          expect(order).not_to be_settling, "Order state: #{order.aasm.current_state}"
-        end
-      end
-
-      context "when 2 shipments shipped of 2" do
-        it "will transition to :settling state" do
-          order.shipments.first.mark_shipped
-          order.shipments.last.mark_shipped
-          order.shipping_completed
-          expect(order).not_to be_shipping, "Order state: #{order.aasm.current_state}"
-          expect(order).to be_settling, "Order state: #{order.aasm.current_state}"
+      context "when all shipments are shipped" do
+        it "will advance to :shipped" do
+          expect(order).to receive(:all_shipped?).and_return(true)
+          expect(order).to be_ordered, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_shipped, "Order state: #{order.aasm.current_state}"
         end
       end
     end
-
-    describe "settle charges" do
+    describe "advance shipped" do
       let(:order) do
-        o=Order.create
-        o.create_payment_method
-        o.shipments.create
-        o.ready_order
+        o = Order.create
+        o.create_shipping_address(zip: "55401")
+        o.advance               # to has_shipping_address
         o
       end
 
       before do
-        expect(order).to receive(:submit_order).and_return(true)
-        order.place_order
-        order.shipments.first.mark_shipped
-        order.shipping_completed
+        allow(order).to receive(:build_shipments).and_return(true)
+        order.shipments.create
+        order.advance           # to has_shipments
+        allow(order).to receive(:set_shipping_options).and_return(true)
+        order.advance           # to has_shipping_options
+        order.create_payment_method
+        order.advance           # to has_payment_method
+        order.payment_method.accepted!
+        order.advance           # to ready_to_order
+        allow(order).to receive(:authorize_charge).and_return(true)
+        order.advance           # to payment_authorized
+        allow(order).to receive(:submit_order).and_return(true)
+        order.advance           # to ordered
+        allow(order).to receive(:all_shipped?).and_return(true)
+        order.advance           # to shipped
       end
 
-      context "when charge settlement fails" do
-        it "will fail to transition to :settled state" do
+      context "when settlement FAILS" do
+        it "will advance to :settlement_failed" do
           expect(order).to receive(:settle_charge).and_return(false)
-          order.settle_charges
+          expect(order).to be_shipped, "Order state: #{order.aasm.current_state}"
+          order.advance
           expect(order).to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-          expect(order).not_to be_settled, "Order state: #{order.aasm.current_state}"
         end
       end
-
-      context "when charge settlement fails" do
-        it "will transition to :settled state" do
+      context "when settlement SUCCEEDS" do
+        it "will advance to :payment_settled" do
           expect(order).to receive(:settle_charge).and_return(true)
-          order.settle_charges
-          expect(order).not_to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-          expect(order).to be_settled, "Order state: #{order.aasm.current_state}"
+          expect(order).to be_shipped, "Order state: #{order.aasm.current_state}"
+          order.advance
+          expect(order).to be_payment_settled, "Order state: #{order.aasm.current_state}"
         end
       end
     end
+    describe "edit_shipping_address" do
+      context "when valid state" do
 
-    describe "apply new payment method to auth_failed" do
-      let(:order) do
-        o=Order.create
-        o.create_payment_method
-        o.shipments.create
-        o.ready_order
-        o
       end
+      context "when invalid state" do
 
-      before do
-        expect(order).to receive(:submit_order).and_return(false)
-        order.place_order
-      end
-
-      it "will transition from auth_failed to ready" do
-        expect(order).to be_auth_failed
-        order.apply_new_payment_method
-        expect(order).to be_ready, "Order state: #{order.aasm.current_state}"
-        expect(order).not_to be_auth_failed, "Order state: #{order.aasm.current_state}"
       end
     end
+    describe "edit_shipping_options" do
+      context "when valid state" do
 
-    describe "apply new payment method to settlement_failed" do
-      let(:order) do
-        o=Order.create
-        o.create_payment_method
-        o.shipments.create
-        o.ready_order
-        o
       end
+      context "when invalid state" do
 
-      before do
-        expect(order).to receive(:submit_order).and_return(true)
-        expect(order).to receive(:settle_charge).and_return(false)
-        order.place_order
-        order.shipments.first.mark_shipped
-        order.shipping_completed
-        order.settle_charges
-      end
-
-      it "will transition from settlement_failed to settling" do
-        expect(order).to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-        order.apply_new_payment_method
-        expect(order).to be_settling, "Order state: #{order.aasm.current_state}"
-        expect(order).not_to be_settlement_failed, "Order state: #{order.aasm.current_state}"
       end
     end
+    describe "edit_payment_method" do
+      context "before order placed" do
 
-    describe "re-run charge on :settlement_failed" do
-      let(:order) do
-        o=Order.create
-        o.create_payment_method
-        o.shipments.create
-        o.ready_order
-        o
       end
+      context "after order placed" do
 
-      before do
-        expect(order).to receive(:submit_order).and_return(true)
-        expect(order).to receive(:settle_charge).and_return(false)
-        order.place_order
-        order.shipments.first.mark_shipped
-        order.shipping_completed
-        order.settle_charges
-      end
-
-      context "when rerunning charge fails" do
-        it "will fail to transition to :settled" do
-          expect(order).to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-          expect(order).to receive(:charge_with_settlement).and_return(false)
-          order.rerun_charge
-          expect(order).not_to be_settled, "Order state: #{order.aasm.current_state}"
-          expect(order).to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-        end
-      end
-
-      context "when rerunning charge succeeds" do
-        it "will transition to :settled" do
-          expect(order).to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-          expect(order).to receive(:charge_with_settlement).and_return(true)
-          order.rerun_charge
-          expect(order).to be_settled, "Order state: #{order.aasm.current_state}"
-          expect(order).not_to be_settlement_failed, "Order state: #{order.aasm.current_state}"
-        end
       end
     end
   end
